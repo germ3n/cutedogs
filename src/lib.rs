@@ -2,178 +2,211 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn};
+use syn::{
+    parse::{Parse, ParseStream},
+    parse_macro_input,
+    punctuated::Punctuated,
+    Ident, ItemFn, LitStr, Result, Token,
+};
+
+#[derive(Default)]
+struct DocArgs {
+    summary: Option<String>,
+    returns: Option<String>,
+    params: Vec<(String, String)>,
+    deprecated: Option<String>,
+    deprecated_since: Option<String>,
+    since: Option<String>,
+    example: Option<String>,
+    panics: Option<String>,
+    safety: Option<String>,
+    see_also: Option<String>,
+    invariants: Option<String>,
+    note: Option<String>,
+    is_unimplemented: bool,
+    unimplemented_reason: Option<String>,
+}
+
+impl Parse for DocArgs {
+    fn parse(input: ParseStream) -> Result<Self> {
+        if input.peek(Ident) && input.peek2(Token![=]) {
+            let key: Ident = input.parse()?;
+            if key == "unimplemented" {
+                input.parse::<Token![=]>()?;
+                let reason = input.parse::<LitStr>()?.value();
+                return Ok(DocArgs {
+                    is_unimplemented: true,
+                    unimplemented_reason: Some(reason),
+                    ..Default::default()
+                });
+            }
+        } else if input.peek(Ident) && input.is_empty() {
+            let key: Ident = input.parse()?;
+            if key == "unimplemented" {
+                return Ok(DocArgs {
+                    is_unimplemented: true,
+                    ..Default::default()
+                });
+            }
+        }
+
+        let mut args = DocArgs::default();
+        let fields = Punctuated::<FieldValue, Token![,]>::parse_terminated(input)?;
+
+        for field in fields {
+            match field {
+                FieldValue::Summary(val) => args.summary = Some(val.value()),
+                FieldValue::Returns(val) => args.returns = Some(val.value()),
+                FieldValue::Deprecated(val) => args.deprecated = Some(val.value()),
+                FieldValue::DeprecatedSince(val) => args.deprecated_since = Some(val.value()),
+                FieldValue::Since(val) => args.since = Some(val.value()),
+                FieldValue::Example(val) => args.example = Some(val.value()),
+                FieldValue::Panics(val) => args.panics = Some(val.value()),
+                FieldValue::Safety(val) => args.safety = Some(val.value()),
+                FieldValue::SeeAlso(val) => args.see_also = Some(val.value()),
+                FieldValue::Invariants(val) => args.invariants = Some(val.value()),
+                FieldValue::Note(val) => args.note = Some(val.value()),
+                FieldValue::Params(params) => args.params = params,
+            }
+        }
+        Ok(args)
+    }
+}
+
+enum FieldValue {
+    Summary(LitStr),
+    Returns(LitStr),
+    Params(Vec<(String, String)>),
+    Deprecated(LitStr),
+    DeprecatedSince(LitStr),
+    Since(LitStr),
+    Example(LitStr),
+    Panics(LitStr),
+    Safety(LitStr),
+    SeeAlso(LitStr),
+    Invariants(LitStr),
+    Note(LitStr),
+}
+
+impl Parse for FieldValue {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let key: Ident = input.parse()?;
+        input.parse::<Token![=]>()?;
+
+        match key.to_string().as_str() {
+            "summary" => Ok(FieldValue::Summary(input.parse()?)),
+            "returns" => Ok(FieldValue::Returns(input.parse()?)),
+            "deprecated" => Ok(FieldValue::Deprecated(input.parse()?)),
+            "deprecated_since" => Ok(FieldValue::DeprecatedSince(input.parse()?)),
+            "since" => Ok(FieldValue::Since(input.parse()?)),
+            "example" => Ok(FieldValue::Example(input.parse()?)),
+            "panics" => Ok(FieldValue::Panics(input.parse()?)),
+            "safety" => Ok(FieldValue::Safety(input.parse()?)),
+            "see_also" => Ok(FieldValue::SeeAlso(input.parse()?)),
+            "invariants" => Ok(FieldValue::Invariants(input.parse()?)),
+            "note" => Ok(FieldValue::Note(input.parse()?)),
+            "params" => {
+                let content;
+                syn::braced!(content in input);
+                let mut params = Vec::new();
+                let fields = Punctuated::<Param, Token![,]>::parse_terminated(&content)?;
+                for param in fields {
+                    params.push((param.name.value(), param.desc.value()));
+                }
+                Ok(FieldValue::Params(params))
+            }
+            _ => Err(syn::Error::new_spanned(
+                key,
+                "unexpected field, expected one of: summary, returns, params, etc.",
+            )),
+        }
+    }
+}
+
+struct Param {
+    name: LitStr,
+    desc: LitStr,
+}
+
+impl Parse for Param {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let name = input.parse()?;
+        input.parse::<Token![:]>()?;
+        let desc = input.parse()?;
+        Ok(Param { name, desc })
+    }
+}
+
 
 #[proc_macro_attribute]
 pub fn document(args: TokenStream, input: TokenStream) -> TokenStream {
+    let args = parse_macro_input!(args as DocArgs);
     let input_fn = parse_macro_input!(input as ItemFn);
-    
-    let args_str = args.to_string();
-    let mut summary = String::new();
-    let mut returns = String::new();
-    let mut params = Vec::<(String, String)>::new();
-    let mut deprecated = String::new();
-    let mut deprecated_since = String::new();
-    let mut since = String::new();
-    let mut example = String::new();
-    let mut panics = String::new();
-    let mut safety = String::new();
-    let mut unimplemented_reason = String::new();
-    let mut see_also = String::new();
-    let mut invariants = String::new();
-    let mut note = String::new();
-    let is_unimplemented = args_str.trim() == "unimplemented" || args_str.trim().starts_with("unimplemented");
-    
-    if is_unimplemented {
-        if args_str.trim() == "unimplemented" {
-            summary = "⚠️ **NOT IMPLEMENTED** - This function is not yet implemented".to_string();
-            returns = "This function will panic with `unimplemented!()` when called".to_string();
-        } else {
-            if let Some(eq_pos) = args_str.find('=') {
-                let after_eq = args_str[eq_pos + 1..].trim();
-                if after_eq.starts_with('"') {
-                    if let Some(end_quote) = after_eq[1..].find('"') {
-                        unimplemented_reason = after_eq[1..end_quote + 1].to_string();
-                    }
-                }
-            }
-            
-            if !unimplemented_reason.is_empty() {
-                summary = format!("⚠️ **NOT IMPLEMENTED** - {}", unimplemented_reason);
-                returns = "This function will panic with `unimplemented!()` when called".to_string();
-            } else {
-                summary = "⚠️ **NOT IMPLEMENTED** - This function is not yet implemented".to_string();
-                returns = "This function will panic with `unimplemented!()` when called".to_string();
-            }
-        }
-    } else {
-        let parse_quoted_value = |field_name: &str| -> String {
-            if let Some(start) = args_str.find(field_name) {
-                if let Some(eq_pos) = args_str[start..].find('=') {
-                    let after_eq = start + eq_pos + 1;
-                    let remaining = args_str[after_eq..].trim();
-                    if remaining.starts_with('"') {
-                        if let Some(end_quote) = remaining[1..].find('"') {
-                            return remaining[1..end_quote + 1].to_string();
-                        }
-                    }
-                }
-            }
-            String::new()
-        };
 
-        summary = parse_quoted_value("summary");
-        returns = parse_quoted_value("returns");
-        deprecated = parse_quoted_value("deprecated");
-        deprecated_since = parse_quoted_value("deprecated_since");
-        since = parse_quoted_value("since");
-        example = parse_quoted_value("example");
-        panics = parse_quoted_value("panics");
-        safety = parse_quoted_value("safety");
-        see_also = parse_quoted_value("see_also");
-        invariants = parse_quoted_value("invariants");
-        note = parse_quoted_value("note");
-        
-        // Parse params - improved to handle whitespace properly
-        if let Some(params_start) = args_str.find("params") {
-            if let Some(brace_start) = args_str[params_start..].find('{') {
-                let brace_start = params_start + brace_start + 1;
-                if let Some(brace_end) = args_str[brace_start..].find('}') {
-                    let params_content = &args_str[brace_start..brace_start + brace_end];
-                    
-                    let mut current_pos = 0;
-                    while current_pos < params_content.len() {
-                        if let Some(colon_pos) = params_content[current_pos..].find(':') {
-                            let param_name = params_content[current_pos..current_pos + colon_pos]
-                                .trim()
-                                .trim_matches('"')
-                                .trim()
-                                .to_string();
-                            
-                            let after_colon = current_pos + colon_pos + 1;
-                            let remaining = params_content[after_colon..].trim();
-                            
-                            if remaining.starts_with('"') {
-                                if let Some(end_quote) = remaining[1..].find('"') {
-                                    let param_desc = remaining[1..end_quote + 1].to_string();
-                                    params.push((param_name, param_desc));
-                                    
-                                    current_pos = after_colon + end_quote + 2;
-                                    while current_pos < params_content.len() && 
-                                          (params_content.chars().nth(current_pos).unwrap().is_whitespace() || 
-                                           params_content.chars().nth(current_pos) == Some(',')) {
-                                        current_pos += 1;
-                                    }
-                                } else {
-                                    break;
-                                }
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
     let mut doc_parts = vec![];
     
-    if !deprecated.is_empty() || !deprecated_since.is_empty() {
-        doc_parts.push(quote! { #[doc = ""] });
-        doc_parts.push(quote! { #[doc = "⚠️ **DEPRECATED**"] });
-        
-        if !deprecated.is_empty() && !deprecated_since.is_empty() {
-            let deprecation_msg = format!("**Deprecated since {}:** {}", deprecated_since, deprecated);
-            doc_parts.push(quote! { #[doc = #deprecation_msg] });
-        } else if !deprecated.is_empty() {
-            let deprecation_msg = format!("{}", deprecated);
-            doc_parts.push(quote! { #[doc = #deprecation_msg] });
-        } else if !deprecated_since.is_empty() {
-            let deprecation_msg = format!("**Deprecated since:** {}", deprecated_since);
-            doc_parts.push(quote! { #[doc = #deprecation_msg] });
-        }
-        
-        doc_parts.push(quote! { #[doc = ""] });
-    }
-    
-    if is_unimplemented {
+    if args.is_unimplemented {
+        let (summary, returns) = if let Some(reason) = args.unimplemented_reason {
+            (
+                format!("⚠️ **NOT IMPLEMENTED** - {}", reason),
+                "This function will panic with `unimplemented!()` when called".to_string(),
+            )
+        } else {
+            (
+                "⚠️ **NOT IMPLEMENTED** - This function is not yet implemented".to_string(),
+                "This function will panic with `unimplemented!()` when called".to_string(),
+            )
+        };
+
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "⚠️ **WARNING: NOT IMPLEMENTED**"] });
         doc_parts.push(quote! { #[doc = ""] });
-        doc_parts.push(quote! { #[doc = "This function is a placeholder and will panic when called."] });
-        doc_parts.push(quote! { #[doc = "It should not be used in production code."] });
+        doc_parts.push(quote! { #[doc = #summary]});
+        doc_parts.push(quote! { #[doc = ""] });
+        doc_parts.push(quote! { #[doc = #returns]});
         doc_parts.push(quote! { #[doc = ""] });
     }
     
-    if !summary.is_empty() {
+    if args.deprecated.is_some() || args.deprecated_since.is_some() {
+        doc_parts.push(quote! { #[doc = ""] });
+        doc_parts.push(quote! { #[doc = "⚠️ **DEPRECATED**"] });
+        
+        let msg = match (args.deprecated, args.deprecated_since) {
+            (Some(reason), Some(since)) => format!("**Deprecated since {}:** {}", since, reason),
+            (Some(reason), None) => reason,
+            (None, Some(since)) => format!("**Deprecated since:** {}", since),
+            (None, None) => unreachable!(),
+        };
+        doc_parts.push(quote! { #[doc = #msg] });
+        doc_parts.push(quote! { #[doc = ""] });
+    }
+    
+    if let Some(summary) = args.summary {
         doc_parts.push(quote! { #[doc = #summary] });
     }
 
-    if !since.is_empty() {
+    if let Some(since) = args.since {
         doc_parts.push(quote! { #[doc = ""] });
         let since_msg = format!("**Since:** {}", since);
         doc_parts.push(quote! { #[doc = #since_msg] });
     }
     
-    if !params.is_empty() {
+    if !args.params.is_empty() {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Parameters"] });
-        for (name, desc) in &params {
+        for (name, desc) in &args.params {
             let param_doc = format!("* `{}` - {}", name, desc);
             doc_parts.push(quote! { #[doc = #param_doc] });
         }
     }
     
-    if !returns.is_empty() {
+    if let Some(returns) = args.returns {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Returns"] });
         doc_parts.push(quote! { #[doc = #returns] });
     }
 
-    if !example.is_empty() {
+    if let Some(example) = args.example {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Example"] });
         doc_parts.push(quote! { #[doc = ""] });
@@ -182,42 +215,35 @@ pub fn document(args: TokenStream, input: TokenStream) -> TokenStream {
         doc_parts.push(quote! { #[doc = "```"] });
     }
 
-    if !panics.is_empty() {
+    if let Some(panics) = args.panics {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Panics"] });
         doc_parts.push(quote! { #[doc = #panics] });
     }
 
-    if !safety.is_empty() {
+    if let Some(safety) = args.safety {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Safety"] });
         doc_parts.push(quote! { #[doc = #safety] });
     }
 
-    if !see_also.is_empty() {
+    if let Some(see_also) = args.see_also {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# See Also"] });
         
-        let functions: Vec<&str> = see_also.split(',').map(|s| s.trim()).collect();
-        for func in functions {
-            let link_doc = if func.contains("::") {
-                format!("* [`{}`]", func)
-            } else if func.starts_with("crate::") {
-                format!("* [`{}`]", func)
-            } else {
-                format!("* [`{}`](crate::{}) | [`Self::{}`] | [`{}`]", func, func, func, func)
-            };
+        for func in see_also.split(',').map(|s| s.trim()) {
+            let link_doc = format!("* [`{}`]", func);
             doc_parts.push(quote! { #[doc = #link_doc] });
         }
     }
 
-    if !invariants.is_empty() {
+    if let Some(invariants) = args.invariants {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Invariants"] });
         doc_parts.push(quote! { #[doc = #invariants] });
     }
 
-    if !note.is_empty() {
+    if let Some(note) = args.note {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Note"] });
         let note_msg = format!("⚠️ {}", note);
