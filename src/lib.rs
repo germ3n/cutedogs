@@ -29,24 +29,30 @@ struct DocArgs {
 
 impl Parse for DocArgs {
     fn parse(input: ParseStream) -> Result<Self> {
-        if input.peek(Ident) && input.peek2(Token![=]) {
-            let key: Ident = input.parse()?;
+        let fork = input.fork();
+        if let Ok(key) = fork.parse::<Ident>() {
             if key == "unimplemented" {
-                input.parse::<Token![=]>()?;
-                let reason = input.parse::<LitStr>()?.value();
-                return Ok(DocArgs {
-                    is_unimplemented: true,
-                    unimplemented_reason: Some(reason),
-                    ..Default::default()
-                });
-            }
-        } else if input.peek(Ident) && input.is_empty() {
-            let key: Ident = input.parse()?;
-            if key == "unimplemented" {
-                return Ok(DocArgs {
-                    is_unimplemented: true,
-                    ..Default::default()
-                });
+                input.parse::<Ident>()?;
+
+                if input.peek(Token![=]) {
+                    input.parse::<Token![=]>()?;
+                    let reason = input.parse::<LitStr>()?.value();
+                    return Ok(DocArgs {
+                        is_unimplemented: true,
+                        unimplemented_reason: Some(reason),
+                        ..Default::default()
+                    });
+                } else if input.is_empty() {
+                    return Ok(DocArgs {
+                        is_unimplemented: true,
+                        ..Default::default()
+                    });
+                } else {
+                    return Err(syn::Error::new(
+                        input.span(),
+                        "unexpected token after `unimplemented` flag",
+                    ));
+                }
             }
         }
 
@@ -137,14 +143,13 @@ impl Parse for Param {
     }
 }
 
-
 #[proc_macro_attribute]
 pub fn document(args: TokenStream, input: TokenStream) -> TokenStream {
     let args = parse_macro_input!(args as DocArgs);
     let input_fn = parse_macro_input!(input as ItemFn);
 
     let mut doc_parts = vec![];
-    
+
     if args.is_unimplemented {
         let (summary, returns) = if let Some(reason) = args.unimplemented_reason {
             (
@@ -166,31 +171,37 @@ pub fn document(args: TokenStream, input: TokenStream) -> TokenStream {
         doc_parts.push(quote! { #[doc = #returns]});
         doc_parts.push(quote! { #[doc = ""] });
     }
-    
-    if args.deprecated.is_some() || args.deprecated_since.is_some() {
+
+    if let (Some(deprecated), Some(deprecated_since)) = (args.deprecated.as_ref(), args.deprecated_since.as_ref()) {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "⚠️ **DEPRECATED**"] });
-        
-        let msg = match (args.deprecated, args.deprecated_since) {
-            (Some(reason), Some(since)) => format!("**Deprecated since {}:** {}", since, reason),
-            (Some(reason), None) => reason,
-            (None, Some(since)) => format!("**Deprecated since:** {}", since),
-            (None, None) => unreachable!(),
-        };
+        let msg = format!("**Deprecated since {}:** {}", deprecated_since, deprecated);
+        doc_parts.push(quote! { #[doc = #msg] });
+        doc_parts.push(quote! { #[doc = ""] });
+    } else if let Some(deprecated) = args.deprecated.as_ref() {
+        doc_parts.push(quote! { #[doc = ""] });
+        doc_parts.push(quote! { #[doc = "⚠️ **DEPRECATED**"] });
+        doc_parts.push(quote! { #[doc = #deprecated] });
+        doc_parts.push(quote! { #[doc = ""] });
+    } else if let Some(deprecated_since) = args.deprecated_since.as_ref() {
+        doc_parts.push(quote! { #[doc = ""] });
+        doc_parts.push(quote! { #[doc = "⚠️ **DEPRECATED**"] });
+        let msg = format!("**Deprecated since:** {}", deprecated_since);
         doc_parts.push(quote! { #[doc = #msg] });
         doc_parts.push(quote! { #[doc = ""] });
     }
-    
-    if let Some(summary) = args.summary {
+
+
+    if let Some(summary) = args.summary.as_ref() {
         doc_parts.push(quote! { #[doc = #summary] });
     }
 
-    if let Some(since) = args.since {
+    if let Some(since) = args.since.as_ref() {
         doc_parts.push(quote! { #[doc = ""] });
         let since_msg = format!("**Since:** {}", since);
         doc_parts.push(quote! { #[doc = #since_msg] });
     }
-    
+
     if !args.params.is_empty() {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Parameters"] });
@@ -199,14 +210,14 @@ pub fn document(args: TokenStream, input: TokenStream) -> TokenStream {
             doc_parts.push(quote! { #[doc = #param_doc] });
         }
     }
-    
-    if let Some(returns) = args.returns {
+
+    if let Some(returns) = args.returns.as_ref() {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Returns"] });
         doc_parts.push(quote! { #[doc = #returns] });
     }
 
-    if let Some(example) = args.example {
+    if let Some(example) = args.example.as_ref() {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Example"] });
         doc_parts.push(quote! { #[doc = ""] });
@@ -215,41 +226,41 @@ pub fn document(args: TokenStream, input: TokenStream) -> TokenStream {
         doc_parts.push(quote! { #[doc = "```"] });
     }
 
-    if let Some(panics) = args.panics {
+    if let Some(panics) = args.panics.as_ref() {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Panics"] });
         doc_parts.push(quote! { #[doc = #panics] });
     }
 
-    if let Some(safety) = args.safety {
+    if let Some(safety) = args.safety.as_ref() {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Safety"] });
         doc_parts.push(quote! { #[doc = #safety] });
     }
 
-    if let Some(see_also) = args.see_also {
+    if let Some(see_also) = args.see_also.as_ref() {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# See Also"] });
-        
+
         for func in see_also.split(',').map(|s| s.trim()) {
             let link_doc = format!("* [`{}`]", func);
             doc_parts.push(quote! { #[doc = #link_doc] });
         }
     }
 
-    if let Some(invariants) = args.invariants {
+    if let Some(invariants) = args.invariants.as_ref() {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Invariants"] });
         doc_parts.push(quote! { #[doc = #invariants] });
     }
 
-    if let Some(note) = args.note {
+    if let Some(note) = args.note.as_ref() {
         doc_parts.push(quote! { #[doc = ""] });
         doc_parts.push(quote! { #[doc = "# Note"] });
         let note_msg = format!("⚠️ {}", note);
         doc_parts.push(quote! { #[doc = #note_msg] });
     }
-    
+
     let result = quote! {
         #(#doc_parts)*
         #input_fn
