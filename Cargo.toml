@@ -1,6 +1,6 @@
 [package]
 name = "cutedogs"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 description = "An easy to use procedural macro to reduce documentation boilerplate"
 license = "MIT OR Apache-2.0"
