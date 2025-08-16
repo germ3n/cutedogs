@@ -8,7 +8,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cutedogs = "0.0.3"
+cutedogs = "0.0.4"
 ```
 
 ## Usage
